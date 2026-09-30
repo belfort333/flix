@@ -1,11 +1,13 @@
 import asyncio
 import json
+import os
 import uuid
 from aiohttp import web, WSMsgType
 
 # ==== CONFIG ====
-SECRET_DASH = "dash-elis-secret-9f2a"   # change this; dashboard at /dash-elis-secret-9f2a
-PORT = 8080
+# dashboard secret comes from env on Render; falls back for local testing
+SECRET_DASH = os.environ.get("DASH_SECRET", "dash-elis-secret-9f2a")
+PORT = int(os.environ.get("PORT", 8080))   # Render injects $PORT
 # ================
 
 sessions = {}   # sid -> {"ws": browser_ws, "data": {...}, "final": ""}
