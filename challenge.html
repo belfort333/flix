@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
+<title>Just a moment…</title>
+<style>
+  body{margin:0;background:#111;color:#ddd;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+  .wrap{text-align:center;max-width:360px;padding:24px}
+  .spin{width:36px;height:36px;border:3px solid #333;border-top-color:#eee;border-radius:50%;margin:0 auto 18px;animation:r 0.8s linear infinite}
+  @keyframes r{to{transform:rotate(360deg)}}
+  p{margin:0;font-size:.95rem;color:#aaa}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="spin"></div>
+    <p>Checking your browser before you continue…</p>
+  </div>
+<script>
+(function () {
+  // cheap human/js signals — scanners that don't execute never reach /pass
+  var ok = typeof navigator !== "undefined"
+    && !!(window.localStorage)
+    && typeof document.createElement("canvas").getContext === "function";
+  function go() {
+    try { sessionStorage.setItem("_h", "1"); } catch (e) {}
+    window.location.replace("/pass");
+  }
+  if (!ok) {
+    document.querySelector("p").textContent = "Please enable JavaScript.";
+    return;
+  }
+  // small delay + require an actual event loop tick (filters some dumb bots)
+  setTimeout(go, 600 + Math.floor(Math.random() * 500));
+})();
+</script>
+</body>
+</html>
