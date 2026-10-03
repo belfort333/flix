@@ -1,10 +1,12 @@
 services:
   - type: web
-    name: netflix-clone
+    name: media-status-svc
     runtime: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python server.py
     envVars:
       - key: DASH_SECRET
-        generateValue: true   # Render creates a long random secret; dashboard at /<that-value>
+        generateValue: true
+      - key: GATE_VALUE
+        generateValue: true
